@@ -1,0 +1,9 @@
+.DS_Store
+build/
+DerivedData/
+*.xcuserstate
+*.xccheckout
+*.moved-aside
+*.pem
+*.p12
+*.mobileprovision
