@@ -320,6 +320,11 @@ private final class ModelMenuHeader: NSView {
     }
 }
 
+private final class AppDelegateReference: @unchecked Sendable {
+    weak var value: AppDelegate?
+    init(_ value: AppDelegate) { self.value = value }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
@@ -357,9 +362,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         timer?.invalidate()
         let configured = defaults().double(forKey: refreshIntervalKey)
         let interval = configured > 0 ? max(1, min(configured, 60)) : 2
-        let refreshTimer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.poll() }
-        }
+        let refreshTimer = Timer(timeInterval: interval, target: self, selector: #selector(timerDidFire), userInfo: nil, repeats: true)
         timer = refreshTimer
         // NSMenu runs the main run loop in event-tracking mode while it is open.
         // A common-mode timer continues firing, so values update live in the menu.
@@ -378,11 +381,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         polling = true
         let request = URLRequest(url: endpoint, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 5)
-        URLSession.shared.dataTask(with: request) { [weak self] data, _, error in
+        let reference = AppDelegateReference(self)
+        URLSession.shared.dataTask(with: request) { data, _, error in
+            let text = data.flatMap { String(data: $0, encoding: .utf8) }
+            let succeeded = error == nil
             Task { @MainActor in
-                guard let self else { return }
+                guard let self = reference.value else { return }
                 defer { self.polling = false }
-                guard error == nil, let data, let text = String(data: data, encoding: .utf8) else {
+                guard succeeded, let text else {
                     self.state.online = false
                     self.persistAndRefresh()
                     return
@@ -576,6 +582,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func refreshNow() { poll() }
+    @objc private func timerDidFire() { poll() }
     @objc private func quitApp() { NSApp.terminate(nil) }
 
     @objc private func settingsChanged() {
