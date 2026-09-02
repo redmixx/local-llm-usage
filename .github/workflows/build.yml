@@ -9,5 +9,7 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+      - name: Install test dependencies
+        run: brew install ripgrep
       - name: Validate and build
         run: ./scripts/check.sh
