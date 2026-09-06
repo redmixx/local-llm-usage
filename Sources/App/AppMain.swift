@@ -260,7 +260,7 @@ private final class MetricMenuRow: NSView {
     func update(name: String, value: String, accent: Bool = false) {
         nameField.stringValue = name
         valueField.stringValue = value
-        valueField.textColor = accent ? .systemGreen : .labelColor
+        valueField.textColor = .labelColor
     }
 }
 
