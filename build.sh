@@ -12,6 +12,7 @@ mkdir -p "$APP/Contents/MacOS" "$WIDGET/Contents/MacOS"
 /usr/bin/swiftc -parse-as-library -O \
   -o "$APP/Contents/MacOS/LocalLLMUsage" \
   "$ROOT/Sources/App/AppMain.swift" \
+  "$ROOT/Sources/Core/MetricsParser.swift" \
   -framework AppKit -framework Charts -framework Foundation -framework SwiftUI -framework UniformTypeIdentifiers -framework WidgetKit
 
 /usr/bin/swiftc -parse-as-library -application-extension -O \

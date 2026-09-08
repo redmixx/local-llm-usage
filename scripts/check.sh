@@ -29,6 +29,7 @@ fi
 if rg -n --hidden \
   --glob '!build/**' \
   --glob '!.git/**' \
+  --glob '!.build/**' \
   '(BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|gh[pousr]_[A-Za-z0-9_]{20,}|api[_-]?key[[:space:]]*[:=][[:space:]]*[^[:space:]]+|password[[:space:]]*[:=][[:space:]]*[^[:space:]]+)' .; then
   echo "Potential secret detected" >&2
   exit 1

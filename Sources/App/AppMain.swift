@@ -100,16 +100,6 @@ struct UsageState: Codable {
     var modelName = "Local model"
 }
 
-struct UsageHistoryPoint: Codable, Identifiable {
-    var id: Date { timestamp }
-    let timestamp: Date
-    let promptTokens: Double
-    let generationTokens: Double
-    let requests: Double
-    let averageTTFT: Double
-    let generationSpeed: Double
-}
-
 private func loadHistory() -> [UsageHistoryPoint] {
     guard let data = defaults().data(forKey: historyKey),
           let history = try? JSONDecoder().decode([UsageHistoryPoint].self, from: data) else { return [] }
@@ -122,55 +112,6 @@ private func saveHistory(_ history: [UsageHistoryPoint]) {
     }
 }
 
-private struct MetricsSnapshot {
-    var prompt = 0.0
-    var generation = 0.0
-    var requests = 0.0
-    var ttftSum = 0.0
-    var ttftCount = 0.0
-    var decodeSeconds = 0.0
-    var promptCreated: Date?
-    var modelName = "Local model"
-}
-
-private func metricValue(_ line: Substring) -> Double? {
-    guard let raw = line.split(separator: " ").last else { return nil }
-    return Double(raw)
-}
-
-private func parseMetrics(_ text: String) -> MetricsSnapshot {
-    var snapshot = MetricsSnapshot()
-    for line in text.split(separator: "\n") where !line.hasPrefix("#") {
-        if line.hasPrefix("vllm:prompt_tokens_total{") {
-            snapshot.prompt += metricValue(line) ?? 0
-        } else if line.hasPrefix("vllm:generation_tokens_total{") {
-            snapshot.generation += metricValue(line) ?? 0
-        } else if line.hasPrefix("vllm:request_success_total{") {
-            snapshot.requests += metricValue(line) ?? 0
-        } else if line.hasPrefix("vllm:time_to_first_token_seconds_sum{") {
-            snapshot.ttftSum += metricValue(line) ?? 0
-        } else if line.hasPrefix("vllm:time_to_first_token_seconds_count{") {
-            snapshot.ttftCount += metricValue(line) ?? 0
-        } else if line.hasPrefix("vllm:request_decode_time_seconds_sum{") {
-            snapshot.decodeSeconds += metricValue(line) ?? 0
-        } else if line.hasPrefix("vllm:prompt_tokens_created{") {
-            if let seconds = metricValue(line) { snapshot.promptCreated = Date(timeIntervalSince1970: seconds) }
-        }
-        if snapshot.modelName == "Local model",
-           let range = line.range(of: "model_name=\"") {
-            let remainder = line[range.upperBound...]
-            if let end = remainder.firstIndex(of: "\"") {
-                snapshot.modelName = String(remainder[..<end])
-            }
-        }
-    }
-    return snapshot
-}
-
-private func counterDelta(_ current: Double, _ previous: Double?) -> Double {
-    guard let previous else { return current }
-    return current >= previous ? current - previous : current
-}
 
 private func compact(_ value: Double) -> String {
     if value >= 1_000_000_000 { return String(format: "%.2fB", value / 1_000_000_000) }
@@ -462,27 +403,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         state.online = true
         state.modelName = snapshot.modelName
         if requestsDelta > 0 || loadHistory().isEmpty {
-            recordHistory(promptDelta: promptDelta, generationDelta: generationDelta, requestsDelta: requestsDelta)
+            recordHistory(promptDelta: promptDelta,
+                          generationDelta: generationDelta,
+                          requestsDelta: requestsDelta,
+                          ttftSumDelta: ttftSumDelta,
+                          ttftCountDelta: ttftCountDelta,
+                          decodeSecondsDelta: decodeDelta)
         }
         persistAndRefresh()
     }
 
-    private func recordHistory(promptDelta: Double, generationDelta: Double, requestsDelta: Double) {
-        let ttft = state.monthTTFTCount > 0 ? state.monthTTFTSum / state.monthTTFTCount : 0
-        let speed = state.monthDecodeSeconds > 0 ? state.monthGeneration / state.monthDecodeSeconds : 0
+    private func recordHistory(promptDelta: Double, generationDelta: Double, requestsDelta: Double,
+                               ttftSumDelta: Double, ttftCountDelta: Double, decodeSecondsDelta: Double) {
+        let point = makeHistoryPoint(timestamp: Date(),
+                                     promptDelta: promptDelta,
+                                     generationDelta: generationDelta,
+                                     requestsDelta: requestsDelta,
+                                     ttftSumDelta: ttftSumDelta,
+                                     ttftCountDelta: ttftCountDelta,
+                                     decodeSecondsDelta: decodeSecondsDelta)
         var history = loadHistory()
-        history.append(UsageHistoryPoint(
-            timestamp: Date(),
-            promptTokens: max(0, promptDelta),
-            generationTokens: max(0, generationDelta),
-            requests: max(0, requestsDelta),
-            averageTTFT: ttft,
-            generationSpeed: speed
-        ))
+        history.append(point)
         let configuredDays = defaults().integer(forKey: historyRetentionKey)
-        let retentionDays = configuredDays > 0 ? configuredDays : 30
-        let cutoff = Calendar.current.date(byAdding: .day, value: -retentionDays, to: Date()) ?? .distantPast
-        history.removeAll { $0.timestamp < cutoff }
+        history = pruneHistory(history, retentionDays: configuredDays)
         saveHistory(history)
     }
 
