@@ -1,5 +1,7 @@
 .DS_Store
 build/
+.build/
+.swiftpm/
 DerivedData/
 *.xcuserstate
 *.xccheckout
@@ -7,3 +9,4 @@ DerivedData/
 *.pem
 *.p12
 *.mobileprovision
+Package.resolved
