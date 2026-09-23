@@ -317,7 +317,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
               let scheme = endpoint.scheme, ["http", "https"].contains(scheme),
               endpoint.host != nil else {
             state.online = false
-            persistAndRefresh()
+            persistAndRefresh(reloadWidget: false)
             return
         }
         polling = true
@@ -331,7 +331,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 defer { self.polling = false }
                 guard succeeded, let text else {
                     self.state.online = false
-                    self.persistAndRefresh()
+                    self.persistAndRefresh(reloadWidget: false)
                     return
                 }
                 self.ingest(parseMetrics(text))
@@ -369,6 +369,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var ttftSumDelta = counterDelta(snapshot.ttftSum, state.lastTTFTSum)
         var ttftCountDelta = counterDelta(snapshot.ttftCount, state.lastTTFTCount)
         var decodeDelta = counterDelta(snapshot.decodeSeconds, state.lastDecodeSeconds)
+        let previousOnline = state.online
 
         // On the first sample, count existing counters only when this vLLM
         // instance started during the current month. Otherwise historical
@@ -410,7 +411,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                           ttftCountDelta: ttftCountDelta,
                           decodeSecondsDelta: decodeDelta)
         }
-        persistAndRefresh()
+        // Widget odświeżamy tylko przy realnej zmianie danych (nowe żądania,
+        // pierwsza próbka albo zmiana stanu online) — nie przy każdym pollu.
+        let onlineChanged = state.online != previousOnline
+        persistAndRefresh(reloadWidget: requestsDelta > 0 || isFirstSample || onlineChanged)
     }
 
     private func recordHistory(promptDelta: Double, generationDelta: Double, requestsDelta: Double,
@@ -429,13 +433,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         saveHistory(history)
     }
 
-    private func persistAndRefresh() {
+    private func persistAndRefresh(reloadWidget: Bool = true) {
         if let data = try? JSONEncoder().encode(state) {
             defaults().set(data, forKey: stateKey)
             defaults().synchronize()
         }
         refreshDisplay()
-        WidgetCenter.shared.reloadTimelines(ofKind: "LocalLLMUsageWidget")
+        // WidgetKit reload jest kosztowny (render + compositing); przeładowujemy
+        // timeline tylko gdy dane naprawdę się zmieniły, nie przy każdym pollu.
+        if reloadWidget {
+            WidgetCenter.shared.reloadTimelines(ofKind: "LocalLLMUsageWidget")
+        }
     }
 
     private func buildMenu() {
