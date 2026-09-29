@@ -96,6 +96,10 @@ struct UsageState: Codable {
     var lastDecodeSeconds: Double?
     var lastUpdated: Date?
     var liveGenerationSpeed: Double?
+    // Serwer (np. tensorfold) zrzuca metryki partiami co ~10 s, więc między
+    // zrzutami delta wynosi 0. Trzymamy ostatnią niezerową prędkość i czas jej
+    // pomiaru, żeby menu nie mrugało 0 między partiami podczas długiej generacji.
+    var liveGenerationSpeedAt: Date?
     var online = false
     var modelName = "Local model"
 }
@@ -399,7 +403,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         state.lastTTFTSum = snapshot.ttftSum
         state.lastTTFTCount = snapshot.ttftCount
         state.lastDecodeSeconds = snapshot.decodeSeconds
-        state.liveGenerationSpeed = !isFirstSample && generationDelta > 0 ? generationDelta / sampleDuration : 0
+        let measuredSpeed = !isFirstSample && generationDelta > 0 ? generationDelta / sampleDuration : 0
+        if measuredSpeed > 0 {
+            state.liveGenerationSpeed = measuredSpeed
+            state.liveGenerationSpeedAt = now
+        } else if let at = state.liveGenerationSpeedAt {
+            // Serwer może raportować metryki partiami: zerujemy dopiero po 15 s
+            // ciszy (dwa typowe odstępy między zrzutami metryk).
+            if now.timeIntervalSince(at) > 15 { state.liveGenerationSpeed = 0 }
+        } else {
+            state.liveGenerationSpeed = 0
+        }
         state.lastUpdated = now
         state.online = true
         state.modelName = snapshot.modelName
@@ -731,7 +745,7 @@ private struct GeneralSettingsView: View {
                 let (data, response) = try await URLSession.shared.data(for: request)
                 let status = (response as? HTTPURLResponse)?.statusCode ?? 0
                 let body = String(data: data.prefix(4096), encoding: .utf8) ?? ""
-                connectionSucceeded = status == 200 && body.contains("vllm:")
+                connectionSucceeded = status == 200 && (body.contains("vllm:") || body.contains("tensorfold:"))
                 connectionStatus = connectionSucceeded ? localized("connected") : "\(localized("invalidResponse")) (HTTP \(status))"
             } catch {
                 connectionSucceeded = false

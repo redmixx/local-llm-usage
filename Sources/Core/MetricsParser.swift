@@ -25,11 +25,13 @@ public func metricValue(_ line: Substring) -> Double? {
 public func parseMetrics(_ text: String) -> MetricsSnapshot {
     var snapshot = MetricsSnapshot()
     for line in text.split(separator: "\n") where !line.hasPrefix("#") {
-        if line.hasPrefix("vllm:prompt_tokens_total{") {
+        // tensorfold serves the same metric names with its own prefix
+        // (tensorfold_prompt_tokens_total instead of vllm:prompt_tokens_total).
+        if line.hasPrefix("vllm:prompt_tokens_total{") || line.hasPrefix("tensorfold_prompt_tokens_total{") {
             snapshot.prompt += metricValue(line) ?? 0
-        } else if line.hasPrefix("vllm:generation_tokens_total{") {
+        } else if line.hasPrefix("vllm:generation_tokens_total{") || line.hasPrefix("tensorfold_completion_tokens_total{") {
             snapshot.generation += metricValue(line) ?? 0
-        } else if line.hasPrefix("vllm:request_success_total{") {
+        } else if line.hasPrefix("vllm:request_success_total{") || line.hasPrefix("tensorfold_requests_total{") {
             snapshot.requests += metricValue(line) ?? 0
         } else if line.hasPrefix("vllm:time_to_first_token_seconds_sum{") {
             snapshot.ttftSum += metricValue(line) ?? 0
@@ -39,6 +41,10 @@ public func parseMetrics(_ text: String) -> MetricsSnapshot {
             snapshot.decodeSeconds += metricValue(line) ?? 0
         } else if line.hasPrefix("vllm:prompt_tokens_created{") {
             if let seconds = metricValue(line) { snapshot.promptCreated = Date(timeIntervalSince1970: seconds) }
+        } else if line.hasPrefix("tensorfold_prefill_seconds_total{") {
+            snapshot.ttftSum += metricValue(line) ?? 0
+        } else if line.hasPrefix("tensorfold_decode_seconds_total{") {
+            snapshot.decodeSeconds += metricValue(line) ?? 0
         }
         if snapshot.modelName == "Local model",
            let range = line.range(of: "model_name=\"") {
