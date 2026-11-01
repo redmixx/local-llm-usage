@@ -104,6 +104,31 @@ struct UsageState: Codable {
     var modelName = "Local model"
 }
 
+extension UsageState {
+    /// Replaces NaN/±inf with zero. JSONEncoder refuses non-finite numbers, so a
+    /// single poisoned sample would otherwise stop state persistence for good.
+    mutating func sanitizeNonFinite() {
+        let counters: [WritableKeyPath<UsageState, Double>] = [
+            \.monthPrompt, \.monthGeneration, \.monthRequests,
+            \.monthTTFTSum, \.monthTTFTCount, \.monthDecodeSeconds,
+            \.dayPrompt, \.dayGeneration, \.dayRequests
+        ]
+        for path in counters where !self[keyPath: path].isFinite {
+            self[keyPath: path] = 0
+        }
+        let lastValues: [WritableKeyPath<UsageState, Double?>] = [
+            \.lastPrompt, \.lastGeneration, \.lastRequests,
+            \.lastTTFTSum, \.lastTTFTCount, \.lastDecodeSeconds,
+            \.liveGenerationSpeed
+        ]
+        for path in lastValues {
+            if let value = self[keyPath: path], !value.isFinite {
+                self[keyPath: path] = 0
+            }
+        }
+    }
+}
+
 private func loadHistory() -> [UsageHistoryPoint] {
     guard let data = defaults().data(forKey: historyKey),
           let history = try? JSONDecoder().decode([UsageHistoryPoint].self, from: data) else { return [] }
@@ -280,12 +305,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var settingsWindow: NSWindow?
     private var state = UsageState()
     private var polling = false
+    // Cached so the whole history array is not decoded on every poll just to
+    // find out whether the chart has been seeded yet.
+    private var historySeeded = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if let data = defaults().data(forKey: stateKey),
            let saved = try? JSONDecoder().decode(UsageState.self, from: data) {
             state = saved
         }
+        historySeeded = !loadHistory().isEmpty
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.image = NSImage(systemSymbolName: "gauge.with.dots.needle.67percent", accessibilityDescription: "Local LLM usage")
@@ -375,11 +404,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var decodeDelta = counterDelta(snapshot.decodeSeconds, state.lastDecodeSeconds)
         let previousOnline = state.online
 
-        // On the first sample, count existing counters only when this vLLM
-        // instance started during the current month. Otherwise historical
-        // counters cannot be split reliably across calendar months.
-        if isFirstSample, let created = snapshot.promptCreated,
-           !calendar.isDate(created, equalTo: now, toGranularity: .month) {
+        // On the first sample, accept the server's existing counters only when
+        // it proves the process started during the current month. TensorFold
+        // exposes no such gauge, so historical traffic is never credited to the
+        // current month.
+        if isFirstSample, !firstSampleIsCurrentMonth(promptCreated: snapshot.promptCreated, now: now) {
             promptDelta = 0
             generationDelta = 0
             requestsDelta = 0
@@ -417,7 +446,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         state.lastUpdated = now
         state.online = true
         state.modelName = snapshot.modelName
-        if requestsDelta > 0 || loadHistory().isEmpty {
+        if requestsDelta > 0 || !historySeeded {
+            historySeeded = true
             recordHistory(promptDelta: promptDelta,
                           generationDelta: generationDelta,
                           requestsDelta: requestsDelta,
@@ -448,6 +478,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func persistAndRefresh(reloadWidget: Bool = true) {
+        // A single non-finite value (NaN/±inf from a malformed metric) makes
+        // JSONEncoder throw, which used to silently stop state persistence for
+        // good. Scrub the state before encoding.
+        state.sanitizeNonFinite()
         if let data = try? JSONEncoder().encode(state) {
             defaults().set(data, forKey: stateKey)
             defaults().synchronize()
@@ -568,6 +602,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         state.dayGeneration = 0
         state.dayRequests = 0
         saveHistory([])
+        historySeeded = false
         persistAndRefresh()
     }
 
