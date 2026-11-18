@@ -145,3 +145,108 @@ struct MetricsParserTests {
         #expect(fallback.map(\.id) == [recent.id])
     }
 }
+
+// A verbatim capture from a live TensorFold endpoint: colon-prefixed metric
+// names, no labels, and no request counter (the latency histogram's sample
+// count stands in for it). The previous parser required an underscore prefix
+// plus a label block, so every one of these lines was silently ignored.
+@Suite("TensorFold metrics")
+struct TensorFoldMetricsTests {
+
+    private let capture = """
+    # HELP tensorfold:requests_running Requests in prefill or decode.
+    # TYPE tensorfold:requests_running gauge
+    tensorfold:requests_running 0
+    # TYPE tensorfold:prompt_tokens_total counter
+    tensorfold:prompt_tokens_total 67519737
+    # TYPE tensorfold:generation_tokens_total counter
+    tensorfold:generation_tokens_total 295663
+    # TYPE tensorfold:request_latency_seconds_count counter
+    tensorfold:request_latency_seconds_count 664
+    # TYPE tensorfold:time_to_first_token_seconds_sum counter
+    tensorfold:time_to_first_token_seconds_sum 11704.27204
+    # TYPE tensorfold:time_to_first_token_seconds_count counter
+    tensorfold:time_to_first_token_seconds_count 661
+    # TYPE tensorfold:request_decode_seconds_sum counter
+    tensorfold:request_decode_seconds_sum 5941.468856
+    # TYPE tensorfold:request_decode_time_seconds_sum counter
+    tensorfold:request_decode_time_seconds_sum 5941.468856
+    """
+
+    @Test("Parses an unlabelled, colon-prefixed capture")
+    func parsesRealCapture() {
+        let snapshot = parseMetrics(capture)
+
+        #expect(snapshot.prompt == 67_519_737)
+        #expect(snapshot.generation == 295_663)
+        #expect(snapshot.requests == 664)
+        #expect(snapshot.ttftCount == 661)
+        #expect(abs(snapshot.ttftSum - 11_704.27204) < 1e-9)
+        #expect(abs(snapshot.decodeSeconds - 5_941.468856) < 1e-9)
+        #expect(snapshot.modelName == "Local model")
+        #expect(snapshot.promptCreated == nil)
+    }
+
+    @Test("Aliased decode metrics are not counted twice")
+    func decodeNotDoubleCounted() {
+        let snapshot = parseMetrics("""
+        tensorfold:request_decode_seconds_sum 100.0
+        tensorfold:request_decode_time_seconds_sum 100.0
+        """)
+        #expect(snapshot.decodeSeconds == 100.0)
+    }
+
+    @Test("Legacy underscore-prefixed names keep working")
+    func legacyUnderscoreNames() {
+        let snapshot = parseMetrics("""
+        tensorfold_prompt_tokens_total{model_name="m"} 10
+        tensorfold_completion_tokens_total{model_name="m"} 20
+        tensorfold_requests_total{model_name="m"} 3
+        tensorfold_prefill_seconds_total{model_name="m"} 1.5
+        tensorfold_decode_seconds_total{model_name="m"} 0.5
+        """)
+        #expect(snapshot.prompt == 10)
+        #expect(snapshot.generation == 20)
+        #expect(snapshot.requests == 3)
+        #expect(snapshot.ttftSum == 1.5)
+        #expect(snapshot.decodeSeconds == 0.5)
+    }
+
+    @Test("Metric names normalise to a shared vocabulary")
+    func canonicalNames() {
+        #expect(canonicalMetricName("vllm:prompt_tokens_total") == "prompt_tokens_total")
+        #expect(canonicalMetricName("tensorfold:prompt_tokens_total") == "prompt_tokens_total")
+        #expect(canonicalMetricName("tensorfold_completion_tokens_total") == "generation_tokens_total")
+        #expect(canonicalMetricName("tensorfold:request_latency_seconds_count") == "request_success_total")
+        #expect(canonicalMetricName("some_other_metric") == "some_other_metric")
+    }
+
+    @Test("Optional Prometheus timestamp is not read as the value")
+    func ignoresTimestampSuffix() {
+        let snapshot = parseMetrics("vllm:prompt_tokens_total{model_name=\"m\"} 1234 1725000000000")
+        #expect(snapshot.prompt == 1234)
+    }
+
+    @Test("Non-finite values are rejected instead of poisoning the counters")
+    func rejectsNonFinite() {
+        let snapshot = parseMetrics("""
+        tensorfold:prompt_tokens_total NaN
+        tensorfold:generation_tokens_total inf
+        """)
+        #expect(snapshot.prompt == 0)
+        #expect(snapshot.generation == 0)
+        #expect(snapshot.prompt.isFinite)
+        #expect(snapshot.generation.isFinite)
+    }
+
+    @Test("First sample is only trusted when the server started this month")
+    func firstSampleGate() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        let now = Date(timeIntervalSince1970: 1_800_000_000) // 2027-01-15
+
+        #expect(firstSampleIsCurrentMonth(promptCreated: nil, now: now, calendar: calendar) == false)
+        #expect(firstSampleIsCurrentMonth(promptCreated: now.addingTimeInterval(-3600), now: now, calendar: calendar) == true)
+        #expect(firstSampleIsCurrentMonth(promptCreated: now.addingTimeInterval(-45 * 24 * 3600), now: now, calendar: calendar) == false)
+    }
+}
