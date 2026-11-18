@@ -4,11 +4,9 @@ import Combine
 import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
+import ServiceManagement
 import WidgetKit
 
-private let suiteName = "group.com.redmix.localllmusage"
-private let stateKey = "usage-state-v1"
-private let historyKey = "usage-history-v1"
 private let endpointKey = "metrics-endpoint"
 private let refreshIntervalKey = "refresh-interval"
 private let menuDisplayKey = "menu-display"
@@ -76,68 +74,15 @@ extension Notification.Name {
     static let usageResetRequested = Notification.Name("usageResetRequested")
 }
 
-struct UsageState: Codable {
-    var monthKey = ""
-    var dayKey = ""
-    var monthPrompt = 0.0
-    var monthGeneration = 0.0
-    var monthRequests = 0.0
-    var monthTTFTSum = 0.0
-    var monthTTFTCount = 0.0
-    var monthDecodeSeconds = 0.0
-    var dayPrompt = 0.0
-    var dayGeneration = 0.0
-    var dayRequests = 0.0
-    var lastPrompt: Double?
-    var lastGeneration: Double?
-    var lastRequests: Double?
-    var lastTTFTSum: Double?
-    var lastTTFTCount: Double?
-    var lastDecodeSeconds: Double?
-    var lastUpdated: Date?
-    var liveGenerationSpeed: Double?
-    // Serwer (np. tensorfold) zrzuca metryki partiami co ~10 s, więc między
-    // zrzutami delta wynosi 0. Trzymamy ostatnią niezerową prędkość i czas jej
-    // pomiaru, żeby menu nie mrugało 0 między partiami podczas długiej generacji.
-    var liveGenerationSpeedAt: Date?
-    var online = false
-    var modelName = "Local model"
-}
-
-extension UsageState {
-    /// Replaces NaN/±inf with zero. JSONEncoder refuses non-finite numbers, so a
-    /// single poisoned sample would otherwise stop state persistence for good.
-    mutating func sanitizeNonFinite() {
-        let counters: [WritableKeyPath<UsageState, Double>] = [
-            \.monthPrompt, \.monthGeneration, \.monthRequests,
-            \.monthTTFTSum, \.monthTTFTCount, \.monthDecodeSeconds,
-            \.dayPrompt, \.dayGeneration, \.dayRequests
-        ]
-        for path in counters where !self[keyPath: path].isFinite {
-            self[keyPath: path] = 0
-        }
-        let lastValues: [WritableKeyPath<UsageState, Double?>] = [
-            \.lastPrompt, \.lastGeneration, \.lastRequests,
-            \.lastTTFTSum, \.lastTTFTCount, \.lastDecodeSeconds,
-            \.liveGenerationSpeed
-        ]
-        for path in lastValues {
-            if let value = self[keyPath: path], !value.isFinite {
-                self[keyPath: path] = 0
-            }
-        }
-    }
-}
-
 private func loadHistory() -> [UsageHistoryPoint] {
-    guard let data = defaults().data(forKey: historyKey),
+    guard let data = defaults().data(forKey: UsageStore.historyKey),
           let history = try? JSONDecoder().decode([UsageHistoryPoint].self, from: data) else { return [] }
     return history
 }
 
 private func saveHistory(_ history: [UsageHistoryPoint]) {
     if let data = try? JSONEncoder().encode(history) {
-        defaults().set(data, forKey: historyKey)
+        defaults().set(data, forKey: UsageStore.historyKey)
     }
 }
 
@@ -157,46 +102,37 @@ private func friendlyModelName(_ raw: String) -> String {
 }
 
 private func defaults() -> UserDefaults {
-    UserDefaults(suiteName: suiteName) ?? .standard
+    UserDefaults(suiteName: UsageStore.suiteName) ?? .standard
 }
 
 private enum LaunchAtLoginManager {
-    static let label = "com.redmix.localllmusage"
-    static var plistURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/LaunchAgents/\(label).plist")
-    }
-
-    static var isEnabled: Bool { FileManager.default.fileExists(atPath: plistURL.path) }
+    static var isEnabled: Bool { SMAppService.mainApp.status == .enabled }
 
     static func setEnabled(_ enabled: Bool) throws {
-        let domain = "gui/\(getuid())"
         if enabled {
-            let payload: [String: Any] = [
-                "Label": label,
-                "ProgramArguments": ["/usr/bin/open", "-gj", Bundle.main.bundlePath],
-                "RunAtLoad": true
-            ]
-            let data = try PropertyListSerialization.data(fromPropertyList: payload, format: .xml, options: 0)
-            try FileManager.default.createDirectory(at: plistURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try data.write(to: plistURL, options: .atomic)
-            runLaunchctl(["bootstrap", domain, plistURL.path])
+            guard SMAppService.mainApp.status != .enabled else { return }
+            try SMAppService.mainApp.register()
         } else {
-            runLaunchctl(["bootout", domain, plistURL.path])
-            if FileManager.default.fileExists(atPath: plistURL.path) {
-                try FileManager.default.removeItem(at: plistURL)
-            }
+            guard SMAppService.mainApp.status == .enabled else { return }
+            try SMAppService.mainApp.unregister()
         }
+        removeLegacyLaunchAgent()
     }
 
-    private static func runLaunchctl(_ arguments: [String]) {
+    /// Older versions registered a hand-written LaunchAgent; clean it up once
+    /// the SMAppService registration took over so both never run.
+    private static func removeLegacyLaunchAgent() {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/com.redmix.localllmusage.plist")
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = arguments
+        process.arguments = ["bootout", "gui/\(getuid())", url.path]
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         try? process.run()
         process.waitUntilExit()
+        try? FileManager.default.removeItem(at: url)
     }
 }
 
@@ -310,7 +246,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var historySeeded = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        if let data = defaults().data(forKey: stateKey),
+        if let data = defaults().data(forKey: UsageStore.stateKey),
            let saved = try? JSONDecoder().decode(UsageState.self, from: data) {
             state = saved
         }
@@ -384,104 +320,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func ingest(_ snapshot: MetricsSnapshot) {
         let now = Date()
-        let sampleDuration = max(now.timeIntervalSince(state.lastUpdated ?? now), 0.001)
-        let calendar = Calendar.current
-        let month = String(format: "%04d-%02d", calendar.component(.year, from: now), calendar.component(.month, from: now))
-        let day = String(format: "%@-%02d", month, calendar.component(.day, from: now))
-        let isFirstSample = state.lastPrompt == nil
-
-        if state.monthKey != month {
-            state.monthKey = month
-            state.monthPrompt = 0
-            state.monthGeneration = 0
-            state.monthRequests = 0
-            state.monthTTFTSum = 0
-            state.monthTTFTCount = 0
-            state.monthDecodeSeconds = 0
-        }
-        if state.dayKey != day {
-            state.dayKey = day
-            state.dayPrompt = 0
-            state.dayGeneration = 0
-            state.dayRequests = 0
-        }
-
-        var promptDelta = counterDelta(snapshot.prompt, state.lastPrompt)
-        var generationDelta = counterDelta(snapshot.generation, state.lastGeneration)
-        var requestsDelta = counterDelta(snapshot.requests, state.lastRequests)
-        var ttftSumDelta = counterDelta(snapshot.ttftSum, state.lastTTFTSum)
-        var ttftCountDelta = counterDelta(snapshot.ttftCount, state.lastTTFTCount)
-        var decodeDelta = counterDelta(snapshot.decodeSeconds, state.lastDecodeSeconds)
-        let previousOnline = state.online
-
-        // On the first sample, accept the server's existing counters only when
-        // it proves the process started during the current month. TensorFold
-        // exposes no such gauge, so historical traffic is never credited to the
-        // current month.
-        if isFirstSample, !firstSampleIsCurrentMonth(promptCreated: snapshot.promptCreated, now: now) {
-            promptDelta = 0
-            generationDelta = 0
-            requestsDelta = 0
-            ttftSumDelta = 0
-            ttftCountDelta = 0
-            decodeDelta = 0
-        }
-
-        state.monthPrompt += promptDelta
-        state.monthGeneration += generationDelta
-        state.monthRequests += requestsDelta
-        state.monthTTFTSum += ttftSumDelta
-        state.monthTTFTCount += ttftCountDelta
-        state.monthDecodeSeconds += decodeDelta
-        state.dayPrompt += promptDelta
-        state.dayGeneration += generationDelta
-        state.dayRequests += requestsDelta
-        state.lastPrompt = snapshot.prompt
-        state.lastGeneration = snapshot.generation
-        state.lastRequests = snapshot.requests
-        state.lastTTFTSum = snapshot.ttftSum
-        state.lastTTFTCount = snapshot.ttftCount
-        state.lastDecodeSeconds = snapshot.decodeSeconds
-        let measuredSpeed = !isFirstSample && generationDelta > 0 ? generationDelta / sampleDuration : 0
-        if measuredSpeed > 0 {
-            state.liveGenerationSpeed = measuredSpeed
-            state.liveGenerationSpeedAt = now
-        } else if let at = state.liveGenerationSpeedAt {
-            // Serwer może raportować metryki partiami: zerujemy dopiero po 15 s
-            // ciszy (dwa typowe odstępy między zrzutami metryk).
-            if now.timeIntervalSince(at) > 15 { state.liveGenerationSpeed = 0 }
-        } else {
-            state.liveGenerationSpeed = 0
-        }
-        state.lastUpdated = now
-        state.online = true
-        state.modelName = snapshot.modelName
-        if requestsDelta > 0 || !historySeeded {
+        let effects = ingestSample(snapshot, into: &state, now: now, historySeeded: historySeeded)
+        if effects.shouldRecordHistory {
             historySeeded = true
-            recordHistory(promptDelta: promptDelta,
-                          generationDelta: generationDelta,
-                          requestsDelta: requestsDelta,
-                          ttftSumDelta: ttftSumDelta,
-                          ttftCountDelta: ttftCountDelta,
-                          decodeSecondsDelta: decodeDelta)
+            recordHistory(effects)
         }
         // Widget odświeżamy tylko przy realnej zmianie danych (nowe żądania,
         // pierwsza próbka albo zmiana stanu online) — nie przy każdym pollu.
-        let onlineChanged = state.online != previousOnline
-        persistAndRefresh(reloadWidget: requestsDelta > 0 || isFirstSample || onlineChanged)
+        persistAndRefresh(reloadWidget: effects.requestsDelta > 0 || effects.isFirstSample || effects.onlineChanged)
     }
 
-    private func recordHistory(promptDelta: Double, generationDelta: Double, requestsDelta: Double,
-                               ttftSumDelta: Double, ttftCountDelta: Double, decodeSecondsDelta: Double) {
+    private func recordHistory(_ effects: IngestEffects) {
         let point = makeHistoryPoint(timestamp: Date(),
-                                     promptDelta: promptDelta,
-                                     generationDelta: generationDelta,
-                                     requestsDelta: requestsDelta,
-                                     ttftSumDelta: ttftSumDelta,
-                                     ttftCountDelta: ttftCountDelta,
-                                     decodeSecondsDelta: decodeSecondsDelta)
-        var history = loadHistory()
-        history.append(point)
+                                     promptDelta: effects.promptDelta,
+                                     generationDelta: effects.generationDelta,
+                                     requestsDelta: effects.requestsDelta,
+                                     ttftSumDelta: effects.ttftSumDelta,
+                                     ttftCountDelta: effects.ttftCountDelta,
+                                     decodeSecondsDelta: effects.decodeSecondsDelta)
+        // Kubełkowanie: próbki z tej samej minuty scala w jeden punkt (ważone
+        // średnie), więc historia nie rośnie o punkt na każdy poll.
+        var history = mergeIntoHistory(loadHistory(), point: point)
         let configuredDays = defaults().integer(forKey: historyRetentionKey)
         history = pruneHistory(history, retentionDays: configuredDays)
         saveHistory(history)
@@ -493,7 +352,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // good. Scrub the state before encoding.
         state.sanitizeNonFinite()
         if let data = try? JSONEncoder().encode(state) {
-            defaults().set(data, forKey: stateKey)
+            defaults().set(data, forKey: UsageStore.stateKey)
             defaults().synchronize()
         }
         refreshDisplay()
@@ -642,7 +501,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 }
 
 private func loadUsageState() -> UsageState {
-    guard let data = defaults().data(forKey: stateKey),
+    guard let data = defaults().data(forKey: UsageStore.stateKey),
           let state = try? JSONDecoder().decode(UsageState.self, from: data) else { return UsageState() }
     return state
 }

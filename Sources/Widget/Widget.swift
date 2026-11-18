@@ -1,35 +1,9 @@
 import SwiftUI
 import WidgetKit
 
-private let suiteName = "group.com.redmix.localllmusage"
-private let stateKey = "usage-state-v1"
-
-struct UsageState: Codable {
-    var monthKey = ""
-    var dayKey = ""
-    var monthPrompt = 0.0
-    var monthGeneration = 0.0
-    var monthRequests = 0.0
-    var monthTTFTSum = 0.0
-    var monthTTFTCount = 0.0
-    var monthDecodeSeconds = 0.0
-    var dayPrompt = 0.0
-    var dayGeneration = 0.0
-    var dayRequests = 0.0
-    var lastPrompt: Double?
-    var lastGeneration: Double?
-    var lastRequests: Double?
-    var lastTTFTSum: Double?
-    var lastTTFTCount: Double?
-    var lastDecodeSeconds: Double?
-    var lastUpdated: Date?
-    var online = false
-    var modelName = "Local model"
-}
-
 private func loadState() -> UsageState {
-    let store = UserDefaults(suiteName: suiteName) ?? .standard
-    guard let data = store.data(forKey: stateKey),
+    let store = UserDefaults(suiteName: UsageStore.suiteName) ?? .standard
+    guard let data = store.data(forKey: UsageStore.stateKey),
           let state = try? JSONDecoder().decode(UsageState.self, from: data) else {
         return UsageState()
     }
