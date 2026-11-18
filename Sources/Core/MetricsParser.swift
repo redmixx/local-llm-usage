@@ -46,7 +46,7 @@ public func metricValue(_ line: Substring) -> Double? {
 // single canonical vocabulary before matching.
 public func canonicalMetricName(_ raw: Substring) -> String {
     var name = String(raw)
-    for prefix in ["vllm:", "vllm_", "tensorfold:", "tensorfold_"] where name.hasPrefix(prefix) {
+    for prefix in ["vllm:", "vllm_", "tensorfold:", "tensorfold_health:", "tensorfold_"] where name.hasPrefix(prefix) {
         name = String(name.dropFirst(prefix.count))
         break
     }

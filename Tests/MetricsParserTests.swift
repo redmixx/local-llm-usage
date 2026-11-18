@@ -218,6 +218,7 @@ struct TensorFoldMetricsTests {
         #expect(canonicalMetricName("tensorfold:prompt_tokens_total") == "prompt_tokens_total")
         #expect(canonicalMetricName("tensorfold_completion_tokens_total") == "generation_tokens_total")
         #expect(canonicalMetricName("tensorfold:request_latency_seconds_count") == "request_success_total")
+        #expect(canonicalMetricName("tensorfold_health:decode_seconds_total") == "request_decode_time_seconds_sum")
         #expect(canonicalMetricName("some_other_metric") == "some_other_metric")
     }
 
