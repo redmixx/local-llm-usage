@@ -4,9 +4,6 @@ import PackageDescription
 let package = Package(
     name: "local-llm-usage-tests",
     platforms: [.macOS(.v15)],
-    dependencies: [
-        .package(url: "https://github.com/apple/swift-testing.git", from: "0.13.0")
-    ],
     targets: [
         .target(
             name: "LocalLLMUsageCore",
@@ -16,7 +13,6 @@ let package = Package(
         .testTarget(
             name: "local-llm-usage-tests",
             dependencies: [
-                .product(name: "Testing", package: "swift-testing"),
                 "LocalLLMUsageCore"
             ],
             path: "Tests",

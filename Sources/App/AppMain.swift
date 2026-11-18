@@ -356,9 +356,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         polling = true
         let request = URLRequest(url: endpoint, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 5)
         let reference = AppDelegateReference(self)
-        URLSession.shared.dataTask(with: request) { data, _, error in
+        URLSession.shared.dataTask(with: request) { data, response, error in
             let text = data.flatMap { String(data: $0, encoding: .utf8) }
-            let succeeded = error == nil
+            // A 404/502 HTML page or a body without any known metric must not
+            // be ingested: it would zero the last-seen counters and the next
+            // good poll would credit the server's lifetime totals to now.
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let succeeded = error == nil && status == 200
             Task { @MainActor in
                 guard let self = reference.value else { return }
                 defer { self.polling = false }
@@ -367,7 +371,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     self.persistAndRefresh(reloadWidget: false)
                     return
                 }
-                self.ingest(parseMetrics(text))
+                let snapshot = parseMetrics(text)
+                guard snapshot.recognizedMetricCount > 0 else {
+                    self.state.online = false
+                    self.persistAndRefresh(reloadWidget: false)
+                    return
+                }
+                self.ingest(snapshot)
             }
         }.resume()
     }

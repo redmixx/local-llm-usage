@@ -13,6 +13,13 @@ public struct MetricsSnapshot {
     public var decodeSeconds = 0.0
     public var promptCreated: Date?
     public var modelName = "Local model"
+    /// Number of lines matched to a known metric. A response with zero of
+    /// these is not a metrics body (HTML error page, wrong path) and must not
+    /// touch the last-seen counters.
+    public internal(set) var recognizedMetricCount = 0
+    // Fallback accumulator for the latency-histogram request count; promoted
+    // to `requests` only when no explicit counter was seen.
+    var histRequests = 0.0
 
     public init() {}
 }
@@ -43,13 +50,18 @@ public func metricValue(_ line: Substring) -> Double? {
 // Both vLLM ("vllm:name") and TensorFold ("tensorfold:name") prefix their
 // metrics. Older TensorFold builds used an underscore instead of a colon, and
 // a few metric names differ between the two, so names are normalised to a
-// single canonical vocabulary before matching.
+// single canonical vocabulary before matching. Alias mapping applies only to
+// prefixed names: a bare `requests_total` from an unrelated exporter sharing
+// the endpoint must not silently become our request counter.
 public func canonicalMetricName(_ raw: Substring) -> String {
     var name = String(raw)
+    var prefixed = false
     for prefix in ["vllm:", "vllm_", "tensorfold:", "tensorfold_health:", "tensorfold_"] where name.hasPrefix(prefix) {
         name = String(name.dropFirst(prefix.count))
+        prefixed = true
         break
     }
+    guard prefixed else { return name }
     switch name {
     case "completion_tokens_total":
         return "generation_tokens_total"
@@ -70,22 +82,45 @@ public func canonicalMetricName(_ raw: Substring) -> String {
 
 public func parseMetrics(_ text: String) -> MetricsSnapshot {
     var snapshot = MetricsSnapshot()
-    for line in text.split(separator: "\n") where !line.hasPrefix("#") {
+    var sawExplicitRequestCounter = false
+    // Split on any newline character: a CRLF body must not collapse into one
+    // line (Character "\r\n" is a single grapheme, so split(separator:) on
+    // "\n" keeps the "\r" attached and every suffix match fails).
+    for line in text.split(whereSeparator: \.isNewline) where !line.hasPrefix("#") {
         if snapshot.modelName == "Local model",
            let range = line.range(of: "model_name=\"") {
-            let remainder = line[range.upperBound...]
-            if let end = remainder.firstIndex(of: "\"") {
-                snapshot.modelName = String(remainder[..<end])
+            // Copy the value honouring backslash escapes, so `a\"b` survives.
+            var value = ""
+            var iterator = line[range.upperBound...].makeIterator()
+            while let character = iterator.next() {
+                if character == "\\" {
+                    if let next = iterator.next() { value.append(next) }
+                    continue
+                }
+                if character == "\"" { break }
+                value.append(character)
             }
+            if !value.isEmpty { snapshot.modelName = value }
         }
         guard let rawName = metricName(line) else { continue }
-        switch canonicalMetricName(rawName) {
+        let canonical = canonicalMetricName(rawName)
+        // The latency histogram's sample count is only a fallback for the
+        // request counter: when a real counter is present too, counting both
+        // would double every request.
+        if canonical == "request_success_total",
+           String(rawName).hasSuffix("request_latency_seconds_count") {
+            if let value = metricValue(line) { snapshot.histRequests += value }
+            snapshot.recognizedMetricCount += 1
+            continue
+        }
+        switch canonical {
         case "prompt_tokens_total":
             snapshot.prompt += metricValue(line) ?? 0
         case "generation_tokens_total":
             snapshot.generation += metricValue(line) ?? 0
         case "request_success_total":
             snapshot.requests += metricValue(line) ?? 0
+            sawExplicitRequestCounter = true
         case "time_to_first_token_seconds_sum":
             snapshot.ttftSum += metricValue(line) ?? 0
         case "time_to_first_token_seconds_count":
@@ -97,9 +132,11 @@ public func parseMetrics(_ text: String) -> MetricsSnapshot {
                 snapshot.promptCreated = Date(timeIntervalSince1970: seconds)
             }
         default:
-            break
+            continue
         }
+        snapshot.recognizedMetricCount += 1
     }
+    if !sawExplicitRequestCounter { snapshot.requests = snapshot.histRequests }
     return snapshot
 }
 

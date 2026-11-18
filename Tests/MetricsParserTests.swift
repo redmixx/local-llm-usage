@@ -228,6 +228,52 @@ struct TensorFoldMetricsTests {
         #expect(snapshot.prompt == 1234)
     }
 
+    @Test("CRLF body parses instead of collapsing into one line")
+    func crlfBody() {
+        let snapshot = parseMetrics("tensorfold:prompt_tokens_total 100\r\ntensorfold:generation_tokens_total 7\r\n")
+        #expect(snapshot.prompt == 100)
+        #expect(snapshot.generation == 7)
+        #expect(snapshot.recognizedMetricCount == 2)
+    }
+
+    @Test("Histogram request count is a fallback, not a second counter")
+    func requestsNotDoubleCounted() {
+        let both = parseMetrics("""
+        vllm:request_success_total 5
+        vllm:request_latency_seconds_count 5
+        """)
+        #expect(both.requests == 5)
+
+        let histogramOnly = parseMetrics("tensorfold:request_latency_seconds_count 664")
+        #expect(histogramOnly.requests == 664)
+    }
+
+    @Test("Unprefixed alias from a foreign exporter is ignored")
+    func bareAliasIgnored() {
+        let snapshot = parseMetrics("""
+        some_exporter_requests_total 999
+        requests_total 999
+        completion_tokens_total 999
+        vllm:prompt_tokens_total 10
+        """)
+        #expect(snapshot.requests == 0)
+        #expect(snapshot.generation == 0)
+        #expect(snapshot.prompt == 10)
+    }
+
+    @Test("Escaped quote in model_name does not truncate the value")
+    func modelNameEscapedQuote() {
+        let snapshot = parseMetrics(#"vllm:prompt_tokens_total{model_name="a\"b"} 1"#)
+        #expect(snapshot.modelName == "a\"b")
+    }
+
+    @Test("recognizedMetricCount is zero for a non-metrics body")
+    func htmlBodyIsNotMetrics() {
+        let snapshot = parseMetrics("<html>503 Service Unavailable</html>")
+        #expect(snapshot.recognizedMetricCount == 0)
+        #expect(snapshot.prompt == 0)
+    }
+
     @Test("Non-finite values are rejected instead of poisoning the counters")
     func rejectsNonFinite() {
         let snapshot = parseMetrics("""

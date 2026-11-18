@@ -38,4 +38,6 @@ fi
 ./build.sh
 codesign --verify --deep --strict "build/Local LLM Usage.app"
 
+./scripts/test.sh
+
 echo "All checks passed."
